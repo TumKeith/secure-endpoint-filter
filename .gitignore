@@ -1,0 +1,14 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+endpoint-filter
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
