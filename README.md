@@ -12,4 +12,18 @@ An endpoint-level DNS filter built in Go designed to enforce a strict Zero-Trust
 Run with administrator privileges:
 ```bash
 go build -o endpoint-filter.exe main.go
-./endpoint-filter.exe
+./endpoint-filter.exe  
+## Windows Background Service (Auto-Start)
+
+To run this filter continuously in the background without keeping a terminal open:
+
+1. Open **PowerShell as Administrator**.
+2. Run the automated setup script:
+   ```powershell
+   .\install-service.ps1
+This script automatically pulls the required service supervisor, compiles the Go engine if needed, and configures Windows to launch it silently at startup.
+
+To stop and uninstall the service:
+
+PowerShell
+.\uninstall-service.ps1
