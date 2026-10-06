@@ -1,29 +1,54 @@
-# Secure Endpoint Walled-Garden Filter
+# Secure Endpoint Filter & Walled Garden
 
-An endpoint-level DNS filter built in Go designed to enforce a strict Zero-Trust / Walled-Garden browsing experience for child safety.
+A lightweight, automated endpoint filtering agent designed to enforce a zero-trust "walled-garden" browsing environment across Windows endpoints.
 
-## Features
-- **Default-Deny Architecture:** Drops all internet traffic except domains explicitly listed in the allowlist.
-- **SafeSearch Injection:** Rewrites Google, Bing, and YouTube requests to enforce strict SafeSearch and Restricted Mode.
-- **Zero-Bypass for App Protocols:** Stops non-browser network applications (Telegram, Discord, Twitter/X, native games) by dropping unauthorized domain resolution requests.
-- **Upstream Protection:** Authorized traffic routes through Cloudflare Family DNS (`1.1.1.3`).
+The filter blocks all non-whitelisted destinations (e.g., social networks, gambling, unauthorized services) while permitting approved resources (e.g., educational platforms, reference libraries) without modifying local firewall rules or requiring manual browser tweaks.
 
-## Usage
-Run with administrator privileges:
-```bash
-go build -o endpoint-filter.exe main.go
-./endpoint-filter.exe  
-## Windows Background Service (Auto-Start)
+## Architecture
 
-To run this filter continuously in the background without keeping a terminal open:
+Traditional DNS interception on modern Windows endpoints frequently leaks due to Chromium's internal stub resolvers, DNS-over-HTTPS (DoH) auto-upgrades, and multi-homed adapter fallbacks.
 
-1. Open **PowerShell as Administrator**.
-2. Run the automated setup script:
-   ```powershell
-   .\install-service.ps1
-This script automatically pulls the required service supervisor, compiles the Go engine if needed, and configures Windows to launch it silently at startup.
+This project uses an **inline loopback HTTP/HTTPS proxy tunnel**:
+1. **Windows System Proxy Binding:** Directs all system web requests to `127.0.0.1:8080`.
+2. **Transparent Interception (`main.go`):** Reads the TLS `CONNECT` handshake and HTTP host headers.
+3. **Allowlist Policy Enforcement:** 
+   - Non-allowlisted domains receive an immediate `HTTP 403 Forbidden` (`Access Denied by Endpoint Policy`).
+   - Allowlisted domains establish a bidirectional TCP tunnel to upstream destinations.
+4. **Clean Teardown:** Completely decouples from system networking upon uninstallation, restoring DHCP and standard proxy configurations.
 
-To stop and uninstall the service:
+## Allowed Domains (Default)
+
+- `wikipedia.org`, `wikimedia.org`
+- `khanacademy.org`, `kastatic.org`
+- `google.com`, `googleapis.com`, `gstatic.com`
+- `classroom.google.com`, `canvaslms.com`, `blackboard.com`
+- `pbskids.org`, `scratch.mit.edu`, `code.org`, `duolingo.com`
+- `nationalgeographic.com`, `nasa.gov`
+
+Custom domains can be added line-by-line in `allowlist.txt`.
+
+## Getting Started (Windows)
+
+### Prerequisites
+- Windows 10/11
+- Go 1.20+ installed
+- PowerShell running as Administrator
+
+### Installation
+Run the automated deployment script from an elevated PowerShell terminal:
+```powershell
+cd C:\secure-endpoint-filter
+.\install-service.ps1
+Uninstallation / Reset
+To immediately disable the filter and restore all factory network settings:
 
 PowerShell
 .\uninstall-service.ps1
+Roadmap
+[x] Windows loopback HTTP/HTTPS proxy filtering engine.
+
+[x] Zero-touch installation & automated clean teardown scripts.
+
+[ ] Implement TCP connection pooling to eliminate tunnel handshake latency on allowed sites.
+
+[ ] Port the walled-garden filtering engine to Android using native Private DNS (DoT) / VpnService architecture.

@@ -2,184 +2,161 @@ package main
 
 import (
 	"bufio"
-	"fmt"
+	"io"
 	"log"
+	"net"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/miekg/dns"
 )
 
 const (
-	// SafeSearch VIPs provided directly by Google, Bing, and YouTube
-	GoogleSafeSearchIP  = "216.239.38.120" // forcesafesearch.google.com
-	BingSafeSearchIP    = "204.79.197.220" // strict.bing.com
-	YouTubeRestrictIP   = "216.239.38.119" // restrict.youtube.com
-	UpstreamParentalDNS = "1.1.1.3:53"     // Cloudflare Family DNS
-	AllowlistFile       = "allowlist.txt"
+	ProxyPort     = ":8080"
+	AllowlistFile = "allowlist.txt"
 )
 
-type WalledGardenEngine struct {
+type ProxyEngine struct {
 	mu        sync.RWMutex
 	allowlist map[string]struct{}
 }
 
-func NewWalledGardenEngine() *WalledGardenEngine {
-	engine := &WalledGardenEngine{
+func NewProxyEngine() *ProxyEngine {
+	pe := &ProxyEngine{
 		allowlist: make(map[string]struct{}),
 	}
 
-	// Default essential base allowlist (Safe search, CDNs, Education)
-	defaultTrusted := []string{
-		// Google Essentials (Search & Assets only)
-		"google.com",
-		"gstatic.com",
-		"googleusercontent.com",
-		"googleapis.com",
-
-		// Educational Platforms
-		"wikipedia.org",
-		"wikimedia.org",
-		"khanacademy.org",
-		"kastatic.org",
-		"pbskids.org",
-		"scratch.mit.edu",
-		"code.org",
-		"duolingo.com",
-		"nationalgeographic.com",
-		"nasa.gov",
-
-		// Learning Management & Schooling
-		"classroom.google.com",
-		"canvaslms.com",
-		"blackboard.com",
+	trusted := []string{
+		"google.com", "gstatic.com", "googleusercontent.com", "googleapis.com",
+		"wikipedia.org", "wikimedia.org", "khanacademy.org", "kastatic.org",
+		"pbskids.org", "scratch.mit.edu", "code.org", "duolingo.com",
+		"nationalgeographic.com", "nasa.gov", "classroom.google.com",
+		"canvaslms.com", "blackboard.com",
 	}
 
-	for _, domain := range defaultTrusted {
-		engine.allowlist[strings.ToLower(domain)] = struct{}{}
+	for _, domain := range trusted {
+		pe.allowlist[strings.ToLower(domain)] = struct{}{}
 	}
-	return engine
+	return pe
 }
 
-// Load custom allowlist from disk if available
-func (wge *WalledGardenEngine) LoadAllowlistFile(path string) {
+func (pe *ProxyEngine) LoadAllowlist(path string) {
 	file, err := os.Open(path)
 	if err != nil {
-		log.Printf("[INFO] %s not found. Using default built-in allowlist.", path)
+		log.Printf("[INFO] %s not found, running with built-in allowlist", path)
 		return
 	}
 	defer file.Close()
 
-	wge.mu.Lock()
-	defer wge.mu.Unlock()
+	pe.mu.Lock()
+	defer pe.mu.Unlock()
 
 	scanner := bufio.NewScanner(file)
-	count := 0
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
-		domain := strings.ToLower(line)
-		wge.allowlist[domain] = struct{}{}
-		count++
+		pe.allowlist[strings.ToLower(line)] = struct{}{}
 	}
 
-	// Fixes the linter warning: check if scanning stopped due to an error
 	if err := scanner.Err(); err != nil {
-		log.Printf("[ERROR] Error reading %s: %v", path, err)
-		return
+		log.Printf("[ERROR] Reading %s: %v", path, err)
 	}
-
-	log.Printf("[ALLOWLIST] Loaded %d additional domains from %s", count, path)
 }
 
-func (wge *WalledGardenEngine) IsAllowed(domain string) bool {
-	wge.mu.RLock()
-	defer wge.mu.RUnlock()
+func (pe *ProxyEngine) IsAllowed(host string) bool {
+	pe.mu.RLock()
+	defer pe.mu.RUnlock()
 
-	domain = strings.ToLower(strings.TrimSuffix(domain, "."))
-	parts := strings.Split(domain, ".")
+	// Strip port if present (e.g., "wikipedia.org:443")
+	h, _, err := net.SplitHostPort(host)
+	if err == nil {
+		host = h
+	}
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
 
-	// Walk up root domains (e.g. static.khanacademy.org -> khanacademy.org)
+	parts := strings.Split(host, ".")
 	for i := 0; i < len(parts)-1; i++ {
 		sub := strings.Join(parts[i:], ".")
-		if _, ok := wge.allowlist[sub]; ok {
+		if _, ok := pe.allowlist[sub]; ok {
 			return true
 		}
 	}
 	return false
 }
 
-func startDNSResolver(engine *WalledGardenEngine) {
-	dns.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
-		msg := new(dns.Msg)
-		msg.SetReply(r)
-		msg.Authoritative = true
-
-		if len(r.Question) == 0 {
-			w.WriteMsg(msg)
-			return
-		}
-
-		q := r.Question[0]
-		domain := strings.ToLower(strings.TrimSuffix(q.Name, "."))
-
-		// 1. Strict Walled-Garden Drop: If not explicitly allowed, reject.
-		if !engine.IsAllowed(domain) {
-			log.Printf("[DROPPED - NOT ALLOWED] %s", domain)
-			msg.Rcode = dns.RcodeNameError // NXDOMAIN
-			w.WriteMsg(msg)
-			return
-		}
-
-		// 2. SafeSearch Enforcement on permitted domains
-		if q.Qtype == dns.TypeA {
-			if strings.Contains(domain, "google.") {
-				rr, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A %s", q.Name, GoogleSafeSearchIP))
-				msg.Answer = append(msg.Answer, rr)
-				w.WriteMsg(msg)
-				log.Printf("[SAFESEARCH APPLIED] %s", domain)
-				return
-			}
-			if strings.Contains(domain, "bing.com") {
-				rr, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A %s", q.Name, BingSafeSearchIP))
-				msg.Answer = append(msg.Answer, rr)
-				w.WriteMsg(msg)
-				log.Printf("[SAFESEARCH APPLIED] %s", domain)
-				return
-			}
-			if strings.Contains(domain, "youtube.com") {
-				rr, _ := dns.NewRR(fmt.Sprintf("%s 300 IN A %s", q.Name, YouTubeRestrictIP))
-				msg.Answer = append(msg.Answer, rr)
-				w.WriteMsg(msg)
-				log.Printf("[YOUTUBE RESTRICTED APPLIED] %s", domain)
-				return
-			}
-		}
-
-		// 3. Forward validated queries to upstream DNS
-		c := new(dns.Client)
-		c.Timeout = 2 * time.Second
-		resp, _, err := c.Exchange(r, UpstreamParentalDNS)
-		if err != nil {
-			dns.HandleFailed(w, r)
-			return
-		}
-		w.WriteMsg(resp)
-	})
-
-	server := &dns.Server{Addr: "127.0.0.1:53", Net: "udp"}
-	log.Println("[RUNNING] Walled Garden Active on 127.0.0.1:53")
-	if err := server.ListenAndServe(); err != nil {
-		log.Fatalf("[FATAL] Port 53 bind error: %v. (Must run as Administrator/Root)", err)
+func handleHTTP(w http.ResponseWriter, req *http.Request, engine *ProxyEngine) {
+	if !engine.IsAllowed(req.Host) {
+		http.Error(w, "Access Denied by Endpoint Policy", http.StatusForbidden)
+		return
 	}
+
+	// HTTPS Tunneling (CONNECT method used by Chrome for all secure sites)
+	if req.Method == http.MethodConnect {
+		destConn, err := net.DialTimeout("tcp", req.Host, 5*time.Second)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			http.Error(w, "Hijacking not supported", http.StatusInternalServerError)
+			destConn.Close()
+			return
+		}
+
+		clientConn, _, err := hijacker.Hijack()
+		if err != nil {
+			destConn.Close()
+			return
+		}
+
+		go transfer(destConn, clientConn)
+		go transfer(clientConn, destConn)
+		return
+	}
+
+	// Standard plain HTTP
+	req.RequestURI = ""
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, vv := range resp.Header {
+		for _, v := range vv {
+			w.Header().Add(k, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
+}
+
+func transfer(destination io.WriteCloser, source io.ReadCloser) {
+	defer destination.Close()
+	defer source.Close()
+	io.Copy(destination, source)
 }
 
 func main() {
-	engine := NewWalledGardenEngine()
-	engine.LoadAllowlistFile(AllowlistFile)
-	startDNSResolver(engine)
+	engine := NewProxyEngine()
+	engine.LoadAllowlist(AllowlistFile)
+
+	server := &http.Server{
+		Addr: "127.0.0.1:8080",
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			handleHTTP(w, r, engine)
+		}),
+	}
+
+	log.Println("[RUNNING] Endpoint Proxy Filter active on 127.0.0.1:8080")
+	if err := server.ListenAndServe(); err != nil {
+		log.Fatalf("Server failed: %v", err)
+	}
 }

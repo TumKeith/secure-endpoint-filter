@@ -1,19 +1,13 @@
-# Ensure script is running as Administrator
-if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "Please run this script from an elevated Administrator PowerShell prompt!"
-    exit 1
-}
+$TaskName = "EndpointGuard"
 
-$ProjectDir = $PSScriptRoot
-$NssmExe = Join-Path $ProjectDir "nssm.exe"
+Write-Host "[1/2] Stopping service..." -ForegroundColor Yellow
+Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+Stop-Process -Name "endpoint-filter" -Force -ErrorAction SilentlyContinue
+Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
-if (Test-Path $NssmExe) {
-    Write-Host "[SERVICE] Stopping and removing EndpointGuard..." -ForegroundColor Yellow
-    & $NssmExe stop EndpointGuard
-    & $NssmExe remove EndpointGuard confirm
-    Write-Host "[SERVICE] Removed successfully." -ForegroundColor Green
-} else {
-    Write-Warning "nssm.exe not found. Checking standard Windows service registry..."
-    Stop-Service -Name EndpointGuard -ErrorAction SilentlyContinue
-    sc.exe delete EndpointGuard
-}
+Write-Host "[2/2] Turning off Windows system proxy..." -ForegroundColor Yellow
+$ProxyReg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+Set-ItemProperty -Path $ProxyReg -Name ProxyEnable -Value 0 -Type DWord
+Remove-ItemProperty -Path $ProxyReg -Name ProxyServer -ErrorAction SilentlyContinue
+
+Write-Host "[SUCCESS] Proxy disabled. All settings are back to normal." -ForegroundColor Green

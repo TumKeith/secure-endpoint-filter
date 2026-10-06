@@ -1,55 +1,38 @@
-<#
-.SYNOPSIS
-    Installs EndpointGuard as an automatic Windows background service using NSSM.
-.DESCRIPTION
-    Downloads NSSM if not present, registers the Go binary as a service,
-    sets the working directory, and starts the service.
-#>
-
-# Ensure script is running as Administrator
+# Must run as Administrator
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "Please run this script from an elevated Administrator PowerShell prompt!"
+    Write-Error "Please run as Administrator!"
     exit 1
 }
 
 $ProjectDir = $PSScriptRoot
-$NssmExe = Join-Path $ProjectDir "nssm.exe"
 $BinaryExe = Join-Path $ProjectDir "endpoint-filter.exe"
+$TaskName = "EndpointGuard"
 
-# 1. Verify binary is compiled
-if (-not (Test-Path $BinaryExe)) {
-    Write-Host "[BUILD] Compiling endpoint-filter.exe..." -ForegroundColor Cyan
-    Set-Location $ProjectDir
-    go build -o endpoint-filter.exe main.go
-    if (-not (Test-Path $BinaryExe)) {
-        Write-Error "Failed to build endpoint-filter.exe. Make sure Go is installed."
-        exit 1
-    }
-}
+# 1. Compile binary
+Write-Host "[1/3] Compiling Go proxy filter..." -ForegroundColor Cyan
+Set-Location $ProjectDir
+go build -o endpoint-filter.exe main.go
 
-# 2. Download precompiled nssm.exe if missing
-if (-not (Test-Path $NssmExe)) {
-    Write-Host "[DOWNLOAD] Fetching NSSM binary..." -ForegroundColor Cyan
-    $ZipPath = Join-Path $ProjectDir "nssm.zip"
-    $Url = "https://nssm.cc/release/nssm-2.24.zip"
-    
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    Invoke-WebRequest -Uri $Url -OutFile $ZipPath
-    
-    Expand-Archive -Path $ZipPath -DestinationPath (Join-Path $ProjectDir "nssm_temp") -Force
-    Copy-Item (Join-Path $ProjectDir "nssm_temp\nssm-2.24\win64\nssm.exe") -Destination $NssmExe
-    
-    # Cleanup temp zip
-    Remove-Item -Recurse -Force (Join-Path $ProjectDir "nssm_temp")
-    Remove-Item -Force $ZipPath
-    Write-Host "[DOWNLOAD] NSSM downloaded successfully." -ForegroundColor Green
-}
+# 2. Register persistent background task under SYSTEM
+Write-Host "[2/3] Registering background service..." -ForegroundColor Cyan
+Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false -ErrorAction SilentlyContinue
 
-# 3. Register and Start Windows Service
-Write-Host "[SERVICE] Registering EndpointGuard..." -ForegroundColor Cyan
-& $NssmExe install EndpointGuard "$BinaryExe"
-& $NssmExe set EndpointGuard AppDirectory "$ProjectDir"
-& $NssmExe set EndpointGuard Start SERVICE_AUTO_START
-& $NssmExe start EndpointGuard
+$Action = New-ScheduledTaskAction -Execute $BinaryExe -WorkingDirectory $ProjectDir
+$Trigger = New-ScheduledTaskTrigger -AtStartup
+$Principal = New-ScheduledTaskPrincipal -UserId "NT AUTHORITY\SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+$Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit (New-TimeSpan -Days 0)
 
-Write-Host "[COMPLETE] EndpointGuard service is installed and running automatically on boot." -ForegroundColor Green
+Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Principal $Principal -Settings $Settings | Out-Null
+Start-ScheduledTask -TaskName $TaskName
+
+# 3. Direct Chrome, Edge, and Windows system traffic to 127.0.0.1:8080
+Write-Host "[3/3] Setting Windows system proxy to 127.0.0.1:8080..." -ForegroundColor Cyan
+$ProxyReg = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+Set-ItemProperty -Path $ProxyReg -Name ProxyEnable -Value 1 -Type DWord
+Set-ItemProperty -Path $ProxyReg -Name ProxyServer -Value "127.0.0.1:8080" -Type String
+
+# Hard-kill browsers once so they immediately pick up the system proxy
+cmd.exe /c "taskkill /F /IM chrome.exe /T 2>nul" | Out-Null
+cmd.exe /c "taskkill /F /IM msedge.exe /T 2>nul" | Out-Null
+
+Write-Host "[SUCCESS] Endpoint Guard is active. Chrome will now intercept every site." -ForegroundColor Green
