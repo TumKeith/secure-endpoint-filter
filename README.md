@@ -1,54 +1,56 @@
-# Secure Endpoint Filter & Walled Garden
+# Secure Endpoint Filter & Walled Garden (Windows & Android)
 
-A lightweight, automated endpoint filtering agent designed to enforce a zero-trust "walled-garden" browsing environment across Windows endpoints.
+A cross-platform, automated endpoint filtering solution engineered to enforce a zero-trust "walled-garden" browsing environment across Windows and Android devices without altering client firewall policies.
 
-The filter blocks all non-whitelisted destinations (e.g., social networks, gambling, unauthorized services) while permitting approved resources (e.g., educational platforms, reference libraries) without modifying local firewall rules or requiring manual browser tweaks.
+Non-whitelisted destinations (gambling, adult content, social media) are terminated by default, while educational and enterprise resources are transparently routed.
 
-## Architecture
+---
 
-Traditional DNS interception on modern Windows endpoints frequently leaks due to Chromium's internal stub resolvers, DNS-over-HTTPS (DoH) auto-upgrades, and multi-homed adapter fallbacks.
+## 1. Windows Architecture (Local Transparent Proxy)
 
-This project uses an **inline loopback HTTP/HTTPS proxy tunnel**:
-1. **Windows System Proxy Binding:** Directs all system web requests to `127.0.0.1:8080`.
-2. **Transparent Interception (`main.go`):** Reads the TLS `CONNECT` handshake and HTTP host headers.
-3. **Allowlist Policy Enforcement:** 
-   - Non-allowlisted domains receive an immediate `HTTP 403 Forbidden` (`Access Denied by Endpoint Policy`).
-   - Allowlisted domains establish a bidirectional TCP tunnel to upstream destinations.
-4. **Clean Teardown:** Completely decouples from system networking upon uninstallation, restoring DHCP and standard proxy configurations.
+Modern Windows browsers bypass local DNS via built-in async stub resolvers and opportunistic DNS-over-HTTPS (DoH). 
 
-## Allowed Domains (Default)
+This project solves client leakage using an inline loopback HTTP/HTTPS proxy tunnel:
+- **System Proxy Hook:** Directs all browser and OS web requests to `127.0.0.1:8080`.
+- **Transparent Interception (`main.go`):** Inspects the TLS `CONNECT` handshake and HTTP host headers.
+- **Immediate Denial:** Non-allowlisted domains receive an instant `HTTP 403 Forbidden` (`Access Denied by Endpoint Policy`).
+- **Clean Teardown:** `uninstall-service.ps1` instantly disengages the proxy, restoring system defaults with zero registry or firewall residue.
 
-- `wikipedia.org`, `wikimedia.org`
-- `khanacademy.org`, `kastatic.org`
-- `google.com`, `googleapis.com`, `gstatic.com`
-- `classroom.google.com`, `canvaslms.com`, `blackboard.com`
-- `pbskids.org`, `scratch.mit.edu`, `code.org`, `duolingo.com`
-- `nationalgeographic.com`, `nasa.gov`
-
-Custom domains can be added line-by-line in `allowlist.txt`.
-
-## Getting Started (Windows)
-
-### Prerequisites
-- Windows 10/11
-- Go 1.20+ installed
-- PowerShell running as Administrator
-
-### Installation
-Run the automated deployment script from an elevated PowerShell terminal:
+### Windows Deployment
 ```powershell
-cd C:\secure-endpoint-filter
+# Run in Administrator PowerShell
 .\install-service.ps1
-Uninstallation / Reset
-To immediately disable the filter and restore all factory network settings:
 
-PowerShell
+# Teardown & Reset
 .\uninstall-service.ps1
-Roadmap
-[x] Windows loopback HTTP/HTTPS proxy filtering engine.
+2. Android Architecture (Native DNS-over-TLS / Private DNS)
+Android 9+ includes native operating-system-level Private DNS (DoT) that enforces encryption across all mobile browsers, applications, and cellular/Wi-Fi connections.
 
-[x] Zero-touch installation & automated clean teardown scripts.
+The android-server/ service acts as an upstream DoT walled garden:
 
-[ ] Implement TCP connection pooling to eliminate tunnel handshake latency on allowed sites.
+Transport: DNS-over-TLS on port 853.
 
-[ ] Port the walled-garden filtering engine to Android using native Private DNS (DoT) / VpnService architecture.
+Filtering Logic: Inspects inbound queries against the centralized allowlist; returns NXDOMAIN for unauthorized hosts and forwards allowed queries to upstream Cloudflare Family DNS (1.1.1.3:53).
+
+Client Deployment: Zero APK installation required. Simply input the host address in Android's native settings under:
+Settings > Network & internet > Private DNS > Private DNS provider hostname.
+
+Android Server Deployment (Docker)
+Bash
+cd android-server
+docker build -t dot-guard .
+docker run -d -p 853:853 --name dot-guard dot-guard
+Allowed Domains (Default)
+wikipedia.org, wikimedia.org
+
+khanacademy.org, kastatic.org
+
+google.com, googleapis.com, gstatic.com
+
+classroom.google.com, canvaslms.com, blackboard.com
+
+pbskids.org, scratch.mit.edu, code.org, duolingo.com
+
+nationalgeographic.com, nasa.gov
+
+Custom domains can be added line-by-line to allowlist.txt.
